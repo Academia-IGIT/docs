@@ -63,38 +63,36 @@ Check BOTH limits across node tree:
 
 ## Journey 1 — Vendor submits an invoice
 
-### Step 1a — PDF upload (optional but typical)
+### Step 1a — PDF upload (required)
 
 Vendor clicks **Upload PDF**. Frontend calls:
 
 ```
-POST /bsms/invoices/vendor-upload-url
-```
-to get a signed GCS upload URL, uploads the PDF directly to GCS (API never receives file bytes), then keeps the returned `s3Key` (GCS path) for the next step.
-
-Alternatively vendor calls:
-
-```
-POST /bsms/invoices/vendor/upload-pdf
+POST /bsms/invoices/vendor-upload
 Content-Type: multipart/form-data
+Body: file (PDF), vendorRegistryId
 ```
 
 → `VendorInvoiceService.uploadInvoicePdf`
 
+API receives file bytes server-side. **No signed URL path for vendors** — server-side upload only.
+
 **Validation before storing:**
 - MIME type must be `application/pdf` → `InvoiceInvalidTypeError`
-- File size ≤ 10 MB → `InvoiceFileTooLargeError`
+- File size ≤ 10 MB (enforced by multer limit before handler runs) → `InvoiceFileTooLargeError`
 - Password-protected PDF → `InvoicePasswordProtectedError` (detected via `pdf-parse` — tries to parse page 1; catches `PasswordException` from pdfjs before any content extraction)
 
-Returns `{ s3Key }` — GCS path `invoices/{enterpriseId}/{uuid}/{filename}`.
+Saves to GCS via `invoiceStorage.save()`. Returns `{ s3Key }` — GCS path `invoices/{enterpriseId}/{uuid}/{filename}`.
 
 ### Step 1b — Submit invoice
+
+`s3Key` from Step 1a is **required** in the submit body (controller Zod schema: `z.string().min(1)`, not optional).
 
 Frontend calls:
 
 ```
 POST /bsms/invoices/vendor
-Body: { vendorRegistryId, spendCategory, currency, s3Key? }
+Body: { vendorRegistryId, spendCategory, currency, s3Key }
 ```
 
 ### Step 2 — Controller (`bsms.controller.ts`)
@@ -203,7 +201,24 @@ Calls `invoiceService.handleAnalysisComplete(id, dto)`.
 
 ## Journey 2 — Enterprise Admin manually enters an invoice
 
-EA opens **Add invoice for vendor**. Frontend calls `POST /bsms/invoices/enterprise-for-vendor`.
+EA can optionally upload a PDF first using the signed URL path (enterprise-only):
+
+```
+POST /bsms/invoices/enterprise-upload-url
+Body: { vendorRegistryId, filename, contentType }
+→ returns { uploadUrl, s3Key, expiresIn: 900 }
+```
+
+EA browser uploads PDF directly to GCS using `uploadUrl`. Keeps `s3Key`.
+
+**Known gap:** `POST /bsms/invoices/enterprise-for-vendor` (the actual submit) uses `SubmitInvoiceForVendorSchema` which has no `s3Key` field. The uploaded PDF `s3Key` is returned to the browser but cannot be passed to the invoice record — it is orphaned in GCS. Enterprise-entered invoices always have `s3Key = null` regardless of whether a PDF was uploaded.
+
+EA submits invoice:
+
+```
+POST /bsms/invoices/enterprise-for-vendor
+Body: { vendorRegistryId, invoiceRef, invoiceDate, amountPaise, spendCategory, currency, dueDate? }
+```
 
 ### Controller → `InvoiceService.submitForVendor`
 
@@ -213,6 +228,7 @@ EA opens **Add invoice for vendor**. Frontend calls `POST /bsms/invoices/enterpr
    - `status = AI_VALIDATED` — skips AI entirely, EA provided all fields
    - `source = ENTERPRISE_ENTERED`
    - Real `invoiceRef`, `invoiceDate`, `amountMinorUnit` from the form
+   - `s3Key = null` — PDF not linked (see gap above)
 
 3. Writes `SUBMITTED` audit event.
 
