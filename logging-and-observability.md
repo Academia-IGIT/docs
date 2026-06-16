@@ -296,6 +296,59 @@ extracts it + spans the job → all spans exported to Sentry OTLP under one trac
 
 ---
 
+## 7b. Environment variables — exact behavior
+
+All optional unless noted. **Backend vars** (`api`/`worker`) live in repo-root `.env`.
+**Web vars** (`NEXT_PUBLIC_*` + source-map vars) live in `apps/web/.env.local` — the
+root `.env` does NOT feed the web app.
+
+### Backend (root `.env`)
+| Var | Default | What it does |
+|---|---|---|
+| `OBSERVABILITY_DISABLED` | `false` | Master kill switch. `true` → no Sentry init (no errors, no logs forwarded) **and** no trace export. stdout logging still works. |
+| `LOG_LEVEL` | `info` | Minimum stdout log level (a **floor**). See gotcha below. |
+| `LOG_PRETTY` | on in dev / off in prod | Output **format** toggle only. `true` → colored pretty; `false` → raw JSON. Not a level. |
+| `SENTRY_DSN` | _(empty)_ | Backend error/log destination. Empty → no-op provider in dev; **throws in production** (fail-fast). |
+| `SENTRY_LOG_LEVELS` | `warn,error,fatal` | Which log levels are **forwarded to Sentry Logs** (an **exact set**). See gotcha below. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | _(empty)_ | Where traces export. Empty → traces collected locally but not sent. Set to Sentry's OTLP URL to export. |
+| `OTEL_EXPORTER_OTLP_HEADERS` | _(empty)_ | Auth header for the OTLP endpoint (`x-sentry-auth=sentry sentry_key=<public-key>`). |
+| `OTEL_TRACES_SAMPLE_RATIO` | `0.1` | Fraction (0–1) of non-money traces kept. Money paths always kept. *(sampling strategy under review — §8)* |
+| `SENTRY_TRACES_SAMPLE_RATE` | `0.1` | **No real effect on backend** — Sentry makes no backend transactions (OTel does). Vestigial; ignore. |
+| `SENTRY_ORG` / `SENTRY_PROJECT` / `SENTRY_AUTH_TOKEN` | _(empty)_ | Source-map upload at build time only. Token is a **secret**. |
+
+### Web (`apps/web/.env.local`)
+| Var | Default | What it does |
+|---|---|---|
+| `NEXT_PUBLIC_OBSERVABILITY_DISABLED` | `false` | Web master kill switch. `true` → browser/SSR send nothing to Sentry. |
+| `NEXT_PUBLIC_SENTRY_DSN` | _(empty)_ | Browser/SSR Sentry destination. Empty → web Sentry effectively off. |
+| `NEXT_PUBLIC_SENTRY_ENV` | `NODE_ENV` | Environment label on web events. |
+| `NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE` | `0.1` | Fraction of browser transactions traced. **Baked at `next build`** — runtime change has no effect on the browser bundle. |
+| `NEXT_PUBLIC_SENTRY_REPLAYS_SESSION_SAMPLE_RATE` | `0.1` | Fraction of sessions replayed. Sessions with errors are always replayed (hardcoded 1.0). |
+
+### Gotchas — the three "log" vars are NOT the same thing
+1. **`LOG_LEVEL` is a FLOOR (≥).** It's one value; everything at that level **and above** is emitted.
+   `LOG_LEVEL=warn` → emits `warn`, `error`, `fatal` (drops `info`, `debug`, `trace`).
+   Order: `trace < debug < info < warn < error < fatal`.
+2. **`SENTRY_LOG_LEVELS` is an EXACT SET (membership).** Comma-separated list of the
+   *specific* levels to forward to Sentry — **not** a floor.
+   `SENTRY_LOG_LEVELS=warn` → forwards **only** `warn`. `error` and `fatal` are **NOT** forwarded.
+   To forward warnings + errors you must list them all: `SENTRY_LOG_LEVELS=warn,error,fatal`.
+   *(This is the key confusion: `warn` here ≠ "warn and up".)*
+3. **`LOG_PRETTY` is format, not level.** Independent axis — controls JSON vs pretty, nothing to do with which logs appear.
+
+**So "do I write only `warn` or all of them?"**
+- For `LOG_LEVEL`: write **one** value (the floor). `warn` is enough to also get error/fatal.
+- For `SENTRY_LOG_LEVELS`: write **every** level you want forwarded. `warn` alone gives you *only* warn — list `warn,error,fatal` (or `info,warn,error,fatal`) explicitly.
+
+### Relationship
+A log must first pass `LOG_LEVEL` (to be emitted at all). Of those emitted, the subset
+whose level ∈ `SENTRY_LOG_LEVELS` is *also* copied to Sentry Logs. Example: `LOG_LEVEL=info`
++ `SENTRY_LOG_LEVELS=warn,error,fatal` → info/warn/error/fatal all hit stdout; only
+warn/error/fatal also go to Sentry. (If `LOG_LEVEL=error`, a `warn` is never emitted, so
+`SENTRY_LOG_LEVELS` listing `warn` does nothing — the floor wins.)
+
+---
+
 ## 8. Known open items
 - **Trace sampling strategy** under review (`sampler.ts`) — head sampling can't be driven by
   a code-set attribute on inbound HTTP (decision is at request start). Options: 100% now, or
